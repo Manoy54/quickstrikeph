@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tailwind CSS"
+  short_description: "Guide Tailwind v4 styling"
+  default_prompt: "Use this skill before editing Tailwind classes, global CSS, theme tokens, dark mode, or responsive layout."

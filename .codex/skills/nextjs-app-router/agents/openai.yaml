@@ -1,0 +1,4 @@
+interface:
+  display_name: "Next.js App Router"
+  short_description: "Guide App Router project work"
+  default_prompt: "Use this skill before changing routes, layouts, data fetching, metadata, images, fonts, caching, or Next config."

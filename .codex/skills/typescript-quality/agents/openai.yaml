@@ -1,0 +1,4 @@
+interface:
+  display_name: "TypeScript Quality"
+  short_description: "Guide strict TypeScript work"
+  default_prompt: "Use this skill before changing TypeScript types, props, route data, imports, tsconfig, or shared helpers."

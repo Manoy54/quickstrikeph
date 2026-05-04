@@ -1,0 +1,4 @@
+interface:
+  display_name: "File Management"
+  short_description: "Guide safe project file work"
+  default_prompt: "Use this skill before creating, moving, renaming, deleting, ignoring, or organizing files in this project."

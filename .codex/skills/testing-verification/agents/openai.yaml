@@ -1,0 +1,4 @@
+interface:
+  display_name: "Testing Verification"
+  short_description: "Guide project verification"
+  default_prompt: "Use this skill before validating changes, adding tests, or choosing a test strategy for this app."

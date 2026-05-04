@@ -1,0 +1,4 @@
+interface:
+  display_name: "Production Security"
+  short_description: "Guide production readiness"
+  default_prompt: "Use this skill before release, security, SEO, caching, accessibility, asset, or deployment changes."
