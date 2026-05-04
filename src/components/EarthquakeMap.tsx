@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent, RefObject, WheelEvent as ReactWheelEvent } from "react";
 import {
   AdvancedMarker,
   InfoWindow,
@@ -71,7 +72,18 @@ function clampToPhilippines(point: { lat: number; lng: number }) {
 }
 
 function clampMapZoom(zoom: number) {
-  return Math.max(3, Math.min(14, Math.round(zoom)));
+  return Math.max(PH_ZOOM, Math.min(14, Math.round(zoom)));
+}
+
+function worldPixelToLatLng(point: { x: number; y: number }, zoom: number) {
+  const worldSize = GOOGLE_TILE_SIZE * 2 ** zoom;
+  const lng = (point.x / worldSize) * 360 - 180;
+  const mercatorY = 0.5 - point.y / worldSize;
+  const lat =
+    (90 -
+      (360 * Math.atan(Math.exp(-mercatorY * 2 * Math.PI))) / Math.PI);
+
+  return clampToPhilippines({ lat, lng });
 }
 
 function PulsingDot({
@@ -201,6 +213,10 @@ function GoogleTileBasemap({
   zoom: number;
   size: { width: number; height: number };
 }) {
+  const [tilesReady, setTilesReady] = useState(false);
+  const loadedCountRef = useRef(0);
+  const batchIdRef = useRef(0);
+
   const tiles = useMemo(() => {
     if (size.width === 0 || size.height === 0) return [];
 
@@ -246,24 +262,79 @@ function GoogleTileBasemap({
     return nextTiles;
   }, [center, size.height, size.width, zoom]);
 
+  // Reset loading state when tiles change and preload them
+  useEffect(() => {
+    if (tiles.length === 0) {
+      setTilesReady(true);
+      return;
+    }
+
+    batchIdRef.current += 1;
+    const currentBatch = batchIdRef.current;
+    loadedCountRef.current = 0;
+    setTilesReady(false);
+
+    let settled = false;
+
+    const onSettled = () => {
+      if (settled || currentBatch !== batchIdRef.current) return;
+      loadedCountRef.current += 1;
+      if (loadedCountRef.current >= tiles.length) {
+        settled = true;
+        setTilesReady(true);
+      }
+    };
+
+    tiles.forEach((tile) => {
+      const img = new Image();
+      img.onload = onSettled;
+      img.onerror = onSettled;
+      img.src = tile.src;
+    });
+
+    // Fallback: reveal after a short timeout so the map is never blank for too long
+    const fallbackTimer = setTimeout(() => {
+      if (currentBatch === batchIdRef.current && !settled) {
+        settled = true;
+        setTilesReady(true);
+      }
+    }, 2500);
+
+    return () => {
+      clearTimeout(fallbackTimer);
+    };
+  }, [tiles]);
+
   return (
     <div className="absolute inset-0 bg-[#73cfe0]" aria-hidden="true">
-      {tiles.map((tile) => (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          key={tile.key}
-          src={tile.src}
-          alt=""
-          draggable={false}
-          className="absolute max-w-none select-none"
-          style={{
-            left: tile.left,
-            top: tile.top,
-            width: GOOGLE_TILE_SIZE,
-            height: GOOGLE_TILE_SIZE,
-          }}
-        />
-      ))}
+      <div
+        className="absolute inset-0"
+        style={{
+          opacity: tilesReady ? 1 : 0,
+          transition: "opacity 250ms ease-in",
+        }}
+      >
+        {tiles.map((tile) => (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            key={tile.key}
+            src={tile.src}
+            alt=""
+            draggable={false}
+            loading="eager"
+            // @ts-expect-error -- fetchPriority is valid HTML but React types may lag
+            fetchpriority="high"
+            decoding="async"
+            className="absolute max-w-none select-none"
+            style={{
+              left: tile.left,
+              top: tile.top,
+              width: GOOGLE_TILE_SIZE,
+              height: GOOGLE_TILE_SIZE,
+            }}
+          />
+        ))}
+      </div>
       <div className="absolute bottom-1 left-1 rounded bg-white/85 px-1.5 py-0.5 text-[10px] font-semibold text-gray-700 shadow-sm">
         Google
       </div>
@@ -300,10 +371,26 @@ function PreviewMap({
   showLegend: boolean;
 }) {
   const mapRef = useRef<HTMLDivElement | null>(null);
+  const activePointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const dragStateRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    startCenterPixel: { x: number; y: number };
+  } | null>(null);
+  const pinchStateRef = useRef<{
+    startDistance: number;
+    startZoom: number;
+  } | null>(null);
   const [mapSize, setMapSize] = useState({ width: 1280, height: 720 });
+  const [viewCenter, setViewCenter] = useState(() => clampToPhilippines(center));
+  const [viewZoom, setViewZoom] = useState(() => clampMapZoom(zoom));
+  const [isDragging, setIsDragging] = useState(false);
   const activeEvent = events.find((event) => event.id === activeEventId) ?? null;
   const radiusEvents = getRadiusEvents(events, showProbabilityRadius);
-  const tileZoom = clampMapZoom(zoom);
+  const tileZoom = clampMapZoom(viewZoom);
+
+  useMapGestureGuards(mapRef);
 
   useEffect(() => {
     const mapElement = mapRef.current;
@@ -327,12 +414,167 @@ function PreviewMap({
     };
   }, []);
 
+  const handlePointerDown = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return;
+
+      activePointersRef.current.set(event.pointerId, {
+        x: event.clientX,
+        y: event.clientY,
+      });
+      event.currentTarget.setPointerCapture(event.pointerId);
+
+      if (activePointersRef.current.size >= 2) {
+        const [firstPointer, secondPointer] = Array.from(
+          activePointersRef.current.values()
+        );
+
+        pinchStateRef.current = {
+          startDistance: getPointerDistance(firstPointer, secondPointer),
+          startZoom: tileZoom,
+        };
+        dragStateRef.current = null;
+        setIsDragging(false);
+        return;
+      }
+
+      dragStateRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startCenterPixel: latLngToWorldPixel(viewCenter, tileZoom),
+      };
+      setIsDragging(true);
+    },
+    [tileZoom, viewCenter]
+  );
+
+  const handlePointerMove = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (activePointersRef.current.has(event.pointerId)) {
+        activePointersRef.current.set(event.pointerId, {
+          x: event.clientX,
+          y: event.clientY,
+        });
+      }
+
+      const pinchState = pinchStateRef.current;
+      if (pinchState && activePointersRef.current.size >= 2) {
+        const [firstPointer, secondPointer] = Array.from(
+          activePointersRef.current.values()
+        );
+        const nextDistance = getPointerDistance(firstPointer, secondPointer);
+
+        if (pinchState.startDistance > 0 && nextDistance > 0) {
+          setViewZoom(
+            clampMapZoom(
+              pinchState.startZoom +
+                Math.log2(nextDistance / pinchState.startDistance)
+            )
+          );
+        }
+
+        return;
+      }
+
+      const dragState = dragStateRef.current;
+      if (!dragState || dragState.pointerId !== event.pointerId) return;
+
+      const deltaX = event.clientX - dragState.startX;
+      const deltaY = event.clientY - dragState.startY;
+      const nextCenterPixel = {
+        x: dragState.startCenterPixel.x - deltaX,
+        y: dragState.startCenterPixel.y - deltaY,
+      };
+
+      setViewCenter(worldPixelToLatLng(nextCenterPixel, tileZoom));
+    },
+    [tileZoom]
+  );
+
+  const endPointerDrag = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      activePointersRef.current.delete(event.pointerId);
+      if (activePointersRef.current.size < 2) {
+        pinchStateRef.current = null;
+      }
+
+      const dragState = dragStateRef.current;
+      if (!dragState || dragState.pointerId !== event.pointerId) {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        return;
+      }
+
+      dragStateRef.current = null;
+      setIsDragging(false);
+
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    },
+    []
+  );
+
+  const handleWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setViewZoom((currentZoom) =>
+      clampMapZoom(currentZoom + (event.deltaY < 0 ? 1 : -1))
+    );
+  }, []);
+
+  const zoomIn = useCallback(() => {
+    setViewZoom((currentZoom) => clampMapZoom(currentZoom + 1));
+  }, []);
+
+  const zoomOut = useCallback(() => {
+    setViewZoom((currentZoom) => clampMapZoom(currentZoom - 1));
+  }, []);
+
   return (
-    <div ref={mapRef} className={`${className} relative overflow-hidden bg-sky-100`}>
-      <GoogleTileBasemap center={center} zoom={tileZoom} size={mapSize} />
+    <div
+      ref={mapRef}
+      className={`${className} relative touch-none overscroll-contain overflow-hidden bg-sky-100 ${
+        isDragging ? "cursor-grabbing" : "cursor-grab"
+      }`}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={endPointerDrag}
+      onPointerCancel={endPointerDrag}
+      onWheel={handleWheel}
+      aria-label="Interactive Google map of Philippine seismic activity"
+    >
+      <GoogleTileBasemap center={viewCenter} zoom={tileZoom} size={mapSize} />
+
+      <div
+        className="absolute left-3 top-3 z-20 overflow-hidden rounded-md border border-border bg-white shadow-sm"
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          className="flex h-9 w-9 items-center justify-center border-b border-border text-lg font-semibold text-text-primary hover:bg-bg-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+          onClick={zoomIn}
+          aria-label="Zoom in"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          className="flex h-9 w-9 items-center justify-center text-lg font-semibold text-text-primary hover:bg-bg-subtle focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+          onClick={zoomOut}
+          aria-label="Zoom out"
+        >
+          -
+        </button>
+      </div>
 
       {events.length === 0 ? (
-        <div className="absolute inset-0 z-10 flex items-center justify-center p-4">
+        <div
+          className="absolute inset-0 z-10 flex items-center justify-center p-4"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
           <div className="rounded-lg bg-white/92 px-4 py-3 text-center shadow-sm ring-1 ring-border backdrop-blur">
             <p className="text-sm font-semibold text-text-primary">
               No events match the current filters
@@ -348,7 +590,7 @@ function PreviewMap({
             const position = projectPointToPreview({
               lat: event.lat,
               lng: event.lng,
-            }, center, tileZoom, mapSize);
+            }, viewCenter, tileZoom, mapSize);
             const radiusPixels = radiusKmToPreviewPixels(
               getEventRadiusKm(event),
               event.lat,
@@ -375,7 +617,7 @@ function PreviewMap({
             const position = projectPointToPreview({
               lat: event.lat,
               lng: event.lng,
-            }, center, tileZoom, mapSize);
+            }, viewCenter, tileZoom, mapSize);
             const isSelected = activeEventId === event.id;
 
             return (
@@ -385,6 +627,7 @@ function PreviewMap({
                 className="absolute z-10 -translate-x-1/2 -translate-y-1/2 cursor-pointer rounded-full focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-brand"
                 style={{ left: position.x, top: position.y }}
                 onClick={() => onMarkerClick(event.id)}
+                onPointerDown={(event) => event.stopPropagation()}
                 aria-pressed={isSelected}
                 aria-label={`${event.location}, magnitude ${event.magnitude}, ${event.likelihood.toLowerCase()} likelihood`}
               >
@@ -400,7 +643,10 @@ function PreviewMap({
       )}
 
       {activeEvent && (
-        <div className="absolute inset-x-3 bottom-3 z-20 rounded-xl bg-white/94 p-3 shadow-lg ring-1 ring-border backdrop-blur">
+        <div
+          className="absolute inset-x-3 bottom-3 z-20 rounded-xl bg-white/94 p-3 shadow-lg ring-1 ring-border backdrop-blur"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
           <div className="flex items-start justify-between gap-3">
             <div>
               <p className="text-sm font-semibold text-text-primary">
@@ -433,7 +679,14 @@ function PreviewMap({
         </div>
       )}
 
-      {showLegend && <MapLegend />}
+      {showLegend && (
+        <div
+          className="pointer-events-none absolute inset-0 z-[80]"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <MapLegend />
+        </div>
+      )}
     </div>
   );
 }
@@ -512,6 +765,7 @@ interface EarthquakeMapProps {
   mapId?: string;
   showLegend?: boolean;
   showZoomControl?: boolean;
+  preferStaticOnMobile?: boolean;
 }
 
 export default function EarthquakeMap({
@@ -526,9 +780,12 @@ export default function EarthquakeMap({
   mapId,
   showLegend = true,
   showZoomControl = true,
+  preferStaticOnMobile = false,
 }: EarthquakeMapProps) {
+  const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const [infoEventId, setInfoEventId] = useState<string | null>(null);
   const [effectiveMinZoom, setEffectiveMinZoom] = useState(PH_MIN_ZOOM);
+  const useStaticMobileMap = useIsMobileViewport(preferStaticOnMobile);
   const hasApiKey = !!GOOGLE_MAPS_API_KEY;
   const activeEventId = selectedEventId ?? infoEventId;
 
@@ -562,9 +819,12 @@ export default function EarthquakeMap({
     return getRadiusEvents(events, showProbabilityRadius);
   }, [events, showProbabilityRadius]);
 
-  if (!hasApiKey) {
+  useMapGestureGuards(mapContainerRef);
+
+  if (!hasApiKey || useStaticMobileMap) {
     return (
       <PreviewMap
+        key={`${mapCenter.lat}-${mapCenter.lng}-${mapZoom}`}
         events={events}
         activeEventId={activeEventId}
         onMarkerClick={handleMarkerClick}
@@ -581,7 +841,10 @@ export default function EarthquakeMap({
   const shouldFocusCamera = !!centerOnEvent || !!center || zoom !== undefined;
 
   return (
-    <div className={`${className} relative overflow-hidden`}>
+    <div
+      ref={mapContainerRef}
+      className={`${className} relative touch-none overscroll-contain overflow-hidden`}
+    >
       <GoogleMap
         defaultBounds={
           usePhilippinesBounds ? { ...PH_BOUNDS, padding: 24 } : undefined
@@ -699,8 +962,73 @@ export default function EarthquakeMap({
             );
           })()}
       </GoogleMap>
-      {showLegend && <MapLegend />}
+      {showLegend && (
+        <div className="pointer-events-none absolute inset-0 z-[80]">
+          <MapLegend />
+        </div>
+      )}
     </div>
+  );
+}
+
+function useIsMobileViewport(enabled: boolean) {
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    if (!enabled) return;
+
+    const mediaQuery = window.matchMedia("(max-width: 1023px)");
+    const updateIsMobile = () => setIsMobile(mediaQuery.matches);
+
+    updateIsMobile();
+    mediaQuery.addEventListener("change", updateIsMobile);
+
+    return () => {
+      mediaQuery.removeEventListener("change", updateIsMobile);
+    };
+  }, [enabled]);
+
+  return enabled && isMobile;
+}
+
+function useMapGestureGuards(mapRef: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const mapElement = mapRef.current;
+    if (!mapElement) return;
+
+    const preventBrowserZoom = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+
+      event.preventDefault();
+    };
+
+    const preventPagePinchZoom = (event: TouchEvent) => {
+      if (event.touches.length < 2) return;
+
+      event.preventDefault();
+    };
+
+    mapElement.addEventListener("wheel", preventBrowserZoom, {
+      passive: false,
+    });
+    mapElement.addEventListener("touchmove", preventPagePinchZoom, {
+      passive: false,
+    });
+
+    return () => {
+      mapElement.removeEventListener("wheel", preventBrowserZoom);
+      mapElement.removeEventListener("touchmove", preventPagePinchZoom);
+    };
+  }, [mapRef]);
+}
+
+function getPointerDistance(
+  firstPointer: { x: number; y: number },
+  secondPointer: { x: number; y: number }
+) {
+  return Math.hypot(
+    firstPointer.x - secondPointer.x,
+    firstPointer.y - secondPointer.y
   );
 }
 

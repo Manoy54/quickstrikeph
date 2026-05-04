@@ -12,8 +12,6 @@ const NAV_LINKS = [
   { href: "/about", label: "About" },
 ] as const;
 
-const DESKTOP_NAV_LINKS = NAV_LINKS.filter(({ href }) => href !== "/");
-
 export default function Navbar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -25,18 +23,20 @@ export default function Navbar() {
         role="navigation"
         aria-label="Main navigation"
       >
-        <div className="mx-auto max-w-7xl flex items-center justify-between px-3 sm:px-6 h-12 sm:h-16">
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between gap-4 px-3 sm:h-16 sm:px-6">
           <Link
             href="/"
-            className="shrink-0 text-sm font-semibold text-text-primary transition-colors hover:text-brand sm:text-base"
+            className="flex shrink-0 items-center text-text-primary transition-opacity hover:opacity-80"
             aria-label="Go to home page"
           >
-            Home
+            <span className="font-display text-lg leading-none sm:text-xl">
+              QuickStrike<span className="text-brand">PH</span>
+            </span>
           </Link>
 
           {/* Desktop Links */}
-          <div className="hidden md:flex items-center gap-1">
-            {DESKTOP_NAV_LINKS.map(({ href, label }) => {
+          <div className="hidden flex-1 items-center justify-center gap-1 md:flex">
+            {NAV_LINKS.map(({ href, label }) => {
               const isActive = pathname === href;
               return (
                 <Link
@@ -91,17 +91,29 @@ export default function Navbar() {
             aria-modal="true"
             aria-label="Navigation menu"
           >
-            <button
-              className="self-end p-2 text-text-secondary hover:text-brand rounded-md"
-              onClick={() => setMobileOpen(false)}
-              aria-label="Close navigation menu"
+            <div className="flex items-center justify-between gap-3">
+              <Link
+                href="/"
+                onClick={() => setMobileOpen(false)}
+                className="flex items-center text-text-primary"
+              aria-label="Go to home page"
             >
-              <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                <path strokeLinecap="round" d="M6 6l12 12M6 18L18 6" />
-              </svg>
-            </button>
+              <span className="font-display text-lg leading-none">
+                QuickStrike<span className="text-brand">PH</span>
+              </span>
+            </Link>
+              <button
+                className="rounded-md p-2 text-text-secondary hover:text-brand"
+                onClick={() => setMobileOpen(false)}
+                aria-label="Close navigation menu"
+              >
+                <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                  <path strokeLinecap="round" d="M6 6l12 12M6 18L18 6" />
+                </svg>
+              </button>
+            </div>
 
-            <div className="mt-6 flex flex-col gap-2">
+            <div className="mt-8 flex flex-col gap-2">
               {NAV_LINKS.map(({ href, label }) => {
                 const isActive = pathname === href;
                 return (
